@@ -1,0 +1,2711 @@
+
+================================================================================
+# FILE: .pre-commit-config.yaml
+================================================================================
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.12
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.20.2
+    hooks:
+      - id: mypy
+        additional_dependencies: [] 
+
+
+================================================================================
+# FILE: .pytest_cache\README.md
+================================================================================
+
+# pytest cache directory #
+
+This directory contains data from the pytest's cache plugin,
+which provides the `--lf` and `--ff` options, as well as the `cache` fixture.
+
+**Do not** commit this to version control.
+
+See [the docs](https://docs.pytest.org/en/stable/how-to/cache.html) for more information.
+
+
+
+================================================================================
+# FILE: packlayer\__init__.py
+================================================================================
+
+from packlayer.client import install_modpack, PacklayerClient
+from packlayer.domain.models import ModFile, Modpack, ModpackVersion
+from packlayer.types import MinecraftVersion
+from packlayer.domain.exceptions import (
+    PacklayerError,
+    ResolveError,
+    LocalFileNotFound,
+    InvalidMrpack,
+    SlugNotFound,
+    NoVersionFound,
+    DownloadError,
+    HashMismatch,
+    NetworkError,
+)
+from packlayer._version import __version__
+
+
+__all__ = (
+    "install_modpack",
+    "PacklayerClient",
+    "ModFile",
+    "Modpack",
+    "ModpackVersion",
+    "PacklayerError",
+    "ResolveError",
+    "LocalFileNotFound",
+    "InvalidMrpack",
+    "SlugNotFound",
+    "NoVersionFound",
+    "DownloadError",
+    "HashMismatch",
+    "NetworkError",
+    "__version__",
+    "MinecraftVersion",
+)
+
+
+
+================================================================================
+# FILE: packlayer\__main__.py
+================================================================================
+
+from packlayer.cli import main
+
+if __name__ == "__main__":
+    main()
+
+
+
+================================================================================
+# FILE: packlayer\_version.py
+================================================================================
+
+from importlib.metadata import version, PackageNotFoundError
+
+try:
+    __version__ = version("packlayer")
+except PackageNotFoundError:
+    __version__ = "dev"
+
+
+
+================================================================================
+# FILE: packlayer\cli\__init__.py
+================================================================================
+
+from .cli import main
+
+__all__ = ("main",)
+
+
+
+================================================================================
+# FILE: packlayer\cli\cli.py
+================================================================================
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import sys
+from pathlib import Path
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
+
+from packlayer.client import PacklayerClient
+from packlayer.config import load_config
+from packlayer.domain.models import InstallOptions, ModFile
+from packlayer.domain.exceptions import PacklayerError
+from packlayer.cli.logging import setup as setup_logging
+from packlayer.cli.theme import console, error, success
+
+
+def main() -> None:
+    args = _parse_args()
+    setup_logging(verbose=args.verbose)
+    config = load_config(Path(args.config) if args.config else None)
+
+    dest = args.dest if args.dest is not None else Path(config.default_dest)
+    options = InstallOptions(
+        include_optional=not args.no_optional if args.no_optional else config.default_options.include_optional,
+        side=args.side if args.side is not None else config.default_options.side,
+    )
+
+    try:
+        asyncio.run(
+            _install(
+                args.source,
+                dest,
+                args.minecraft or config.minecraft_version,
+                args.version,
+                options,
+                config,
+            )
+        )
+    except PacklayerError as e:
+        error(str(e))
+        sys.exit(1)
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="packlayer",
+        description="Minecraft modpack installer.",
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable verbose logging.",
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help="Path to a .toml config file.",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    install = sub.add_parser(
+        "install", help="Install a modpack from a .mrpack file, URL, or slug."
+    )
+    install.add_argument("source", help="Path, URL, Modrinth slug/URL, or ftb:<id>.")
+    install.add_argument(
+        "--dest",
+        type=Path,
+        default=None,
+        help="Instance root directory (default: ./dest).",
+    )
+    install.add_argument(
+        "--version",
+        help="Modpack release version (e.g. 0.7.3).",
+        default=None,
+    )
+    install.add_argument(
+        "--minecraft",
+        metavar="VERSION",
+        default=None,
+        help="Filter by Minecraft version (e.g. 1.20.1).",
+    )
+    install.add_argument(
+        "--no-optional",
+        action="store_true",
+        default=False,
+        help="Skip optional mods.",
+    )
+    install.add_argument(
+        "--side",
+        choices=["client", "server", "both"],
+        default=None,
+        help="Which side to install for (default: client).",
+    )
+
+    return parser.parse_args()
+
+
+async def _install(
+    source: str,
+    dest: Path,
+    minecraft_version: str | None,
+    modpack_version: str | None,
+    options: InstallOptions,
+    config,
+) -> None:
+    async with PacklayerClient(
+        minecraft_version=minecraft_version,
+        config=config,
+    ) as client:
+        with console.status(f"[info]resolving {source}[/info]"):
+            modpack = await client.resolve(source, modpack_version=modpack_version)
+
+        console.print(
+            f"[name]{modpack.name}[/name] [version]{modpack.version}[/version]"
+            f" — [count]{len(modpack.files)} files[/count]"
+        )
+
+        with Progress(
+            TextColumn("[info]{task.description}[/info]"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("downloading", total=None)
+
+            def on_start(total: int) -> None:
+                progress.update(task, total=total)
+
+            def on_progress() -> None:
+                progress.advance(task)
+
+            results = await client.install(
+                modpack,
+                dest,
+                on_start=on_start,
+                on_progress=on_progress,
+                options=options,
+            )
+
+        success(f"{len(results.downloads)} mods, {results.override_count} overrides → {dest}")
+
+
+================================================================================
+# FILE: packlayer\cli\logging.py
+================================================================================
+
+from __future__ import annotations
+
+import logging
+
+from rich.logging import RichHandler
+
+from packlayer.cli.theme import console
+
+logger = logging.getLogger("packlayer")
+
+
+def setup(verbose: bool) -> None:
+    level = logging.DEBUG if verbose else logging.WARNING
+    logging.basicConfig(
+        level=level,
+        format="%(message)s",
+        handlers=[RichHandler(console=console, show_path=verbose, markup=True)],
+    )
+    logger.setLevel(level)
+
+
+
+================================================================================
+# FILE: packlayer\cli\theme.py
+================================================================================
+
+from __future__ import annotations
+
+from rich.console import Console
+from rich.theme import Theme
+
+_THEME = Theme(
+    {
+        "info": "cyan",
+        "muted": "dim",
+        "success": "bold green",
+        "error": "bold red",
+        "name": "bold",
+        "version": "dim",
+        "path": "cyan",
+        "count": "green",
+    }
+)
+
+console = Console(theme=_THEME)
+
+
+def info(msg: str) -> None:
+    console.print(f"[info]{msg}[/info]")
+
+
+def success(msg: str) -> None:
+    console.print(f"[success]{msg}[/success]")
+
+
+def error(msg: str) -> None:
+    console.print(f"[error]{msg}[/error]")
+
+
+def muted(msg: str) -> None:
+    console.print(f"[muted]{msg}[/muted]")
+
+
+
+================================================================================
+# FILE: packlayer\client.py
+================================================================================
+
+from __future__ import annotations
+
+import os
+from typing import Callable
+from pathlib import Path
+
+from inspect import iscoroutinefunction
+import asyncio
+
+from packlayer.domain.models import Modpack, ModpackVersion
+from packlayer.interfaces.downloader import DownloadResult
+from packlayer.infrastructure.http import PacklayerHTTP
+from packlayer.infrastructure.downloader import HttpDownloader
+from packlayer.infrastructure.installer import InstallModpack, InstallResult
+from packlayer.interfaces.resolver import ModpackResolver
+from packlayer.providers import ModrinthResolver, FTBResolver
+from packlayer.providers.registry import ResolverRegistry
+from packlayer.domain.models import ModFile, InstallOptions
+from packlayer.domain.config import PacklayerConfig
+from packlayer.types import MinecraftVersion, ProgressCallback
+
+
+def wrap_progress(cb: ProgressCallback) -> Callable[[], None]:
+    """
+    Normalise a progress callback so the installer always receives a plain
+    sync callable, regardless of whether the caller supplied an async one.
+
+    Async callbacks are scheduled as fire-and-forget tasks on the running
+    event loop so they don't block the download pipeline.
+    """
+    if iscoroutinefunction(cb):
+
+        def wrapper() -> None:
+            asyncio.get_running_loop().create_task(cb())
+
+        return wrapper
+    return cb  # type: ignore[return-value]
+
+
+class PacklayerClient:
+    """
+    High-level async client for interacting with packlayer.
+
+    Must be used as an async context manager to ensure the underlying HTTP
+    session is properly opened and closed.
+
+    Parameters
+    ----------
+    minecraft_version:
+        Optional Minecraft version filter.
+    concurrency:
+        Maximum simultaneous file downloads. Defaults to 8.
+    extra_resolvers:
+        Additional resolvers registered before the built-ins, giving them
+        higher priority. Useful for third-party providers or overriding
+        built-in resolution behaviour. Each resolver must implement
+        :class:`~packlayer.interfaces.resolver.ModpackResolver` and return
+        ``True`` from ``can_handle`` only for sources it owns.
+    default_resolver:
+        Fallback resolver used when no registered resolver claims the source.
+        If omitted and no resolver matches, :exc:`~packlayer.NoResolverFound`
+        is raised.
+    config:
+        Optional :class:`~packlayer.domain.config.PacklayerConfig` instance.
+        Values from the config are used as defaults; explicit constructor
+        arguments take precedence.
+
+    Example
+    -------
+    ```python
+        async with PacklayerClient(minecraft_version="1.20.1") as client:
+            versions = await client.list_versions("mr:fabulously-optimized")
+            modpack  = await client.resolve("mr:fabulously-optimized", modpack_version=versions[0].version_number)
+            result   = await client.install(modpack, "./instance")
+            print(f"{result.total} files installed ({len(result.downloads)} mods, {result.override_count} overrides)")
+    ```
+
+    Plugin example
+    --------------
+    ```python
+        async with PacklayerClient(extra_resolvers=[MyCurseForgeResolver()]) as client:
+            modpack = await client.resolve("https://curseforge.com/minecraft/modpacks/...")
+            await client.install(modpack, "./instance")
+    ```
+    """
+
+    def __init__(
+        self,
+        *,
+        minecraft_version: MinecraftVersion | None = None,
+        concurrency: int = 8,
+        extra_resolvers: list[ModpackResolver] | None = None,
+        default_resolver: ModpackResolver | None = None,
+        config: PacklayerConfig | None = None,
+    ) -> None:
+        self._config = cfg = config or PacklayerConfig()
+        self._minecraft_version = minecraft_version or cfg.minecraft_version
+        self._concurrency = concurrency or cfg.concurrency
+        self._extra_resolvers = extra_resolvers or []
+        self._default_resolver = default_resolver
+
+        self._http: PacklayerHTTP | None = None
+        self._registry: ResolverRegistry | None = None
+
+    async def __aenter__(self) -> PacklayerClient:
+        self._http = PacklayerHTTP(retry=self._config.retry)
+        await self._http.__aenter__()
+
+        self._registry = ResolverRegistry()
+        if self._default_resolver:
+            self._registry.set_default_resolver(self._default_resolver)
+
+        for r in self._extra_resolvers:
+            self._registry.register(r)
+
+        self._registry.register(FTBResolver(self._http, self._minecraft_version))
+        self._registry.register(ModrinthResolver(self._http, self._minecraft_version))
+        return self
+
+    async def __aexit__(self, *_) -> None:
+        if self._http:
+            await self._http.__aexit__(None, None, None)
+            self._http = None
+
+    def resolvers(self) -> list[ModpackResolver]:
+        """Return all registered resolvers in priority order."""
+        return self._require_registry().resolvers()
+
+    async def list_versions(self, source: str) -> list[ModpackVersion]:
+        """
+        Return all available versions of a modpack, newest-first.
+
+        Dispatches to the appropriate registered resolver via
+        :class:`~packlayer.providers.registry.ResolverRegistry`.
+        Optionally filtered by the ``minecraft_version`` passed at
+        construction time, if the resolver supports it.
+
+        Parameters
+        ----------
+        source:
+            A source string accepted by any registered resolver
+            (e.g. ``"fabulously-optimized"``, ``"https://modrinth.com/modpack/..."``).
+
+        Returns
+        -------
+        list[ModpackVersion]
+
+        Raises
+        ------
+        NoResolverFound
+            No registered resolver claimed the source.
+        PacklayerError
+            The resolver failed to fetch versions (slug not found, network error, etc.).
+        """
+        return await self._require_registry().pick(source).fetch_versions(source)
+
+    async def resolve(
+        self, source: str, *, modpack_version: str | None = None
+    ) -> Modpack:
+        """
+        Resolve a modpack from ``source`` without downloading its files.
+
+        Dispatches to the appropriate registered resolver via
+        :class:`~packlayer.providers.registry.ResolverRegistry`. Returns a
+        :class:`~packlayer.Modpack` containing metadata and the full file list,
+        ready to be passed to :meth:`install`.
+
+        Raises
+        ------
+        NoResolverFound
+            No registered resolver claimed the source.
+        PacklayerError
+            Resolution failed (invalid file, slug not found, network error, etc.).
+        """
+        return await self.resolver_for(source).resolve(
+            source, modpack_version=modpack_version
+        )
+
+    async def install(
+        self,
+        modpack: Modpack,
+        dest: str | os.PathLike[str],
+        *,
+        on_start: Callable[[int], None] | None = None,
+        on_progress: ProgressCallback | None = None,
+        options: InstallOptions | None = None,
+    ) -> InstallResult:
+        """
+        Install a modpack to ``dest``.
+
+        Mods are placed in ``dest/mods/``. Override files (configs, scripts,
+        resource packs, etc.) are written relative to ``dest/``, preserving
+        the directory structure declared by the modpack.
+
+        Parameters
+        ----------
+        modpack:
+            A resolved :class:`~packlayer.Modpack` from :meth:`resolve`.
+        dest:
+            Instance root directory. Created if it does not exist. Mods go
+            into ``dest/mods/``; overrides are written relative to ``dest/``.
+        on_start:
+            Optional callback invoked with the total file count (mods +
+            overrides) before downloading starts.
+        on_progress:
+            Optional callback invoked after each file is installed (both mods
+            and overrides). Sync and async callables are both accepted.
+        options:
+            Controls which files are downloaded. See :class:`~packlayer.InstallOptions`.
+
+        Returns
+        -------
+        InstallResult
+
+        Raises
+        ------
+        PacklayerError
+            If download or hash verification fails.
+        ValueError
+            If ``dest`` exists but is not a directory.
+        """
+        dest = Path(dest).expanduser().resolve()
+        if dest.exists() and not dest.is_dir():
+            raise ValueError(f"destination must be a directory: {dest}")
+
+        installer = InstallModpack(
+            downloader=HttpDownloader(self._require_http()),
+            on_start=on_start,
+            on_progress=wrap_progress(on_progress) if on_progress else None,
+            concurrency=self._concurrency,
+            options=options,
+        )
+        return await installer.install(modpack, dest)
+
+    def resolver_for(self, source: str) -> ModpackResolver:
+        """Return the resolver that would handle ``source``."""
+        return self._require_registry().pick(source)
+
+    def _require_http(self) -> PacklayerHTTP:
+        if self._http is None:
+            raise RuntimeError(
+                "PacklayerClient must be used as an async context manager:\n"
+                "\n"
+                "    async with PacklayerClient() as client:\n"
+                "        ...\n"
+            )
+        return self._http
+
+    def _require_registry(self) -> ResolverRegistry:
+        if self._registry is None:
+            raise RuntimeError(
+                "PacklayerClient must be used as an async context manager:\n"
+                "\n"
+                "    async with PacklayerClient() as client:\n"
+                "        ...\n"
+            )
+        return self._registry
+
+
+async def install_modpack(
+    source: str,
+    dest: str | os.PathLike[str],
+    *,
+    minecraft_version: str | None = None,
+    modpack_version: str | None = None,
+    concurrency: int = 8,
+    on_start: Callable[[int], None] | None = None,
+    on_progress: ProgressCallback | None = None,
+    options: InstallOptions | None = None,
+    extra_resolvers: list[ModpackResolver] | None = None,
+    default_resolver: ModpackResolver | None = None,
+) -> InstallResult:
+    """
+    Install a Minecraft modpack in a single call.
+
+    Convenience wrapper around :class:`PacklayerClient`. For multiple
+    operations, fine-grained control, or custom resolvers, use the client
+    directly.
+
+    Parameters
+    ----------
+    source:
+        Any source string accepted by a registered resolver — local path,
+        direct URL, or provider-prefixed ID (e.g. ``"mr:fabulously-optimized"``,
+        ``"ftb:79"``).
+    dest:
+        Instance root directory. Mods go into ``dest/mods/``; overrides are
+        written relative to ``dest/``.
+    minecraft_version:
+        Optional Minecraft version filter, passed through to resolvers
+        that support it.
+    modpack_version:
+        Pin a specific modpack version (e.g. ``"6.0.1"``). If omitted,
+        the latest compatible version is used.
+    concurrency:
+        Maximum simultaneous downloads. Defaults to 8.
+    on_start:
+        Optional callback invoked with the total file count (mods + overrides)
+        before downloading starts.
+    on_progress:
+        Optional callback (sync or async) invoked after each installed file
+        (both mods and overrides).
+    options:
+        Controls which files are downloaded. See :class:`~packlayer.InstallOptions`.
+    extra_resolvers:
+        Additional resolvers registered before the built-ins.
+    default_resolver:
+        Fallback resolver when no registered resolver claims the source.
+
+    Returns
+    -------
+    InstallResult
+
+    Raises
+    ------
+    NoResolverFound
+        No registered resolver claimed the source.
+    PacklayerError
+        If resolution, download, or verification fails.
+
+    Examples
+    --------
+    Basic::
+
+        asyncio.run(install_modpack("mr:fabulously-optimized", "./instance"))
+
+    With async progress::
+
+        async def on_file():
+            await ws.send("progress")
+
+        asyncio.run(
+            install_modpack("mr:pack.mrpack", "./instance", on_progress=on_file)
+        )
+    """
+    async with PacklayerClient(
+        minecraft_version=minecraft_version,
+        concurrency=concurrency,
+        extra_resolvers=extra_resolvers,
+        default_resolver=default_resolver,
+    ) as client:
+        modpack = await client.resolve(source, modpack_version=modpack_version)
+        return await client.install(
+            modpack,
+            dest,
+            on_start=on_start,
+            on_progress=on_progress,
+            options=options,
+        )
+
+
+================================================================================
+# FILE: packlayer\config.py
+================================================================================
+
+# packlayer/config.py
+from __future__ import annotations
+from pathlib import Path
+import tomllib
+from packlayer.domain.config import PacklayerConfig, RetryConfig
+from packlayer.domain.models import InstallOptions
+
+_SEARCH = [
+    Path(".packlayer.toml"),
+    Path("packlayer.toml"),
+    Path.home() / ".config" / "packlayer" / "config.toml",
+]
+
+def load_config(path: Path | None = None) -> PacklayerConfig:
+    candidates = [path] if path else _SEARCH
+    for p in candidates:
+        if p and p.exists():
+            with p.open("rb") as f:
+                raw = tomllib.load(f)
+            return _parse(raw)
+    return PacklayerConfig()
+
+def _parse(raw: dict) -> PacklayerConfig:
+    install = raw.get("install", {})
+    retry = raw.get("retry", {})
+    return PacklayerConfig(
+        concurrency=raw.get("concurrency", 8),
+        minecraft_version=raw.get("minecraft_version"),
+        default_dest=install.get("dest", "./mods"),
+        default_options=InstallOptions(
+            side=install.get("side", "client"),
+            include_optional=install.get("include_optional", True),
+        ),
+        retry=RetryConfig(
+            max_retries=retry.get("max_retries", 5),
+            backoff_base=retry.get("backoff_base", 2.0),
+            retryable_statuses=frozenset(retry.get("retryable_statuses", [429, 500, 502, 503, 504])),
+        ),
+    )
+
+
+================================================================================
+# FILE: packlayer\domain\__init__.py
+================================================================================
+
+from .models import ModFile, Modpack, InstallOptions, Override
+from .exceptions import (
+    PacklayerError,
+    ResolveError,
+    LocalFileNotFound,
+    InvalidMrpack,
+    SlugNotFound,
+    NoVersionFound,
+    NoResolverFound,
+    DownloadError,
+    HashMismatch,
+    NetworkError,
+)
+
+__all__ = (
+    "ModFile",
+    "Modpack",
+    "Override",
+    "InstallOptions",
+    "PacklayerError",
+    "ResolveError",
+    "LocalFileNotFound",
+    "InvalidMrpack",
+    "SlugNotFound",
+    "NoVersionFound",
+    "NoResolverFound",
+    "DownloadError",
+    "HashMismatch",
+    "NetworkError",
+)
+
+
+================================================================================
+# FILE: packlayer\domain\config.py
+================================================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from packlayer.domain.models import InstallOptions
+
+@dataclass
+class RetryConfig:
+    max_retries: int = 5
+    backoff_base: float = 2.0
+    retryable_statuses: frozenset[int] = field(
+        default_factory=lambda: frozenset({429, 500, 502, 503, 504})
+    )
+
+@dataclass
+class PacklayerConfig:
+    concurrency: int = 8
+    minecraft_version: str | None = None
+    default_dest: str = "./dest"
+    default_options: InstallOptions = field(default_factory=InstallOptions)
+    retry: RetryConfig = field(default_factory=RetryConfig)
+
+
+
+================================================================================
+# FILE: packlayer\domain\exceptions.py
+================================================================================
+
+from __future__ import annotations
+
+
+class PacklayerError(Exception):
+    """Base exception for all packlayer errors."""
+
+
+class ResolveError(PacklayerError):
+    """Failed to resolve a modpack."""
+
+
+class LocalFileNotFound(ResolveError):
+    def __init__(self, path: str) -> None:
+        super().__init__(f"file not found: {path}")
+
+
+class InvalidMrpack(ResolveError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"invalid .mrpack: {reason}")
+
+
+class SlugNotFound(ResolveError):
+    def __init__(self, slug: str) -> None:
+        super().__init__(f"modpack not found on Modrinth: {slug!r}")
+
+
+class NoVersionFound(ResolveError):
+    def __init__(self, slug: str, minecraft_version: str | None) -> None:
+        mc = f" for Minecraft {minecraft_version}" if minecraft_version else ""
+        super().__init__(f"no .mrpack version found for {slug!r}{mc}")
+
+
+class NoResolverFound(ResolveError):
+    def __init__(self, source: str) -> None:
+        super().__init__(f"no resolver can handle source: {source!r}")
+
+
+class DownloadError(PacklayerError):
+    """Failed to download a file."""
+
+
+class HashMismatch(DownloadError):
+    def __init__(self, filename: str) -> None:
+        super().__init__(f"sha512 mismatch — file may be corrupted: {filename}")
+
+
+class NetworkError(PacklayerError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"network error: {reason}")
+
+
+
+================================================================================
+# FILE: packlayer\domain\models.py
+================================================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Literal
+
+
+@dataclass(frozen=True)
+class ModFile:
+    """A single file entry within a modpack.
+
+    Attributes
+    ----------
+    url:
+        Remote download URL for the file.
+    filename:
+        Bare filename (no directory component) used when writing to disk.
+    size:
+        Expected file size in bytes, as declared in the modpack index.
+    hash:
+        Optional expected hex digest. Verified after download; raises
+        :exc:`~packlayer.HashMismatch` if the digest does not match.
+    hash_type:
+        The type of said hash, e.g: ``"sha512"``, ``"sha1"``, etc.
+    optional:
+        Whether this mod is optional.
+    side:
+        Whether the mod is client-side, server-side, or both.
+    """
+
+    url: str
+    filename: str
+    size: int
+    hash: str | None = None
+    hash_type: Literal["sha512", "sha1"] | None = None
+    optional: bool = False
+    side: Literal["client", "server", "both"] = "both"
+
+
+@dataclass(frozen=True)
+class Override:
+    """A non-mod file to be written into the instance directory after installation.
+
+    Overrides cover anything outside ``mods/`` — configs, scripts, resource packs,
+    shader settings, etc. The content is either bundled inline (``data``) or fetched
+    from a remote URL (``url``); exactly one should be set.
+
+    Attributes
+    ----------
+    path:
+        Destination path relative to the instance root (e.g. ``"config/sodium.json"``).
+        Parent directories are created automatically during installation.
+    side:
+        Which side this override applies to. Overrides incompatible with the
+        chosen :class:`InstallOptions` side are skipped during installation.
+    data:
+        Raw file contents to write directly to disk. Set by resolvers that
+        bundle overrides inside the package itself (e.g. ``.mrpack`` zips).
+        Mutually exclusive with ``url``.
+    url:
+        Remote URL to fetch the file from. Set by resolvers where override
+        files are hosted separately (e.g. FTB). Mutually exclusive with ``data``.
+    """
+
+    path: str
+    side: Literal["client", "server", "both"] = "both"
+    data: bytes | None = None
+    url: str | None = None
+
+
+@dataclass(frozen=True)
+class Modpack:
+    """A resolved modpack ready for installation.
+
+    Attributes
+    ----------
+    name:
+        Human-readable display name of the modpack.
+    version:
+        Version identifier string (e.g. ``"1.8.3"``).
+    minecraft_version:
+        The Minecraft version this modpack targets (e.g. ``"1.20.1"``).
+    files:
+        Immutable sequence of :class:`ModFile` entries to be downloaded.
+        Empty by default for modpacks that declare no files.
+    overrides:
+        Immutable sequence of :class:`Override` entries to be written to the
+        instance directory. Empty by default.
+    """
+
+    name: str
+    version: str
+    minecraft_version: str
+    files: tuple[ModFile, ...] = field(default_factory=tuple)
+    overrides: tuple[Override, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class ModpackVersion:
+    """Metadata for a single releasable version of a modpack.
+
+    Returned by :meth:`~packlayer.PacklayerClient.list_versions`. Use
+    ``version_number`` to pin a specific release when calling
+    :meth:`~packlayer.PacklayerClient.resolve`.
+
+    Attributes
+    ----------
+    id:
+        Opaque provider-assigned identifier for this version.
+    version_number:
+        Human-readable version string (e.g. ``"5.4.0-beta.3"``).
+    name:
+        Display name of the release (may differ from ``version_number``).
+    loaders:
+        Mod loaders this version supports (e.g. ``("fabric", "quilt")``).
+    game_versions:
+        Minecraft versions this release is compatible with
+        (e.g. ``("1.20.1",)``).
+    date_published:
+        ISO 8601 timestamp of when this version was published
+        (e.g. ``"2024-03-15T10:00:00Z"``).
+    """
+
+    id: str
+    version_number: str
+    name: str
+    loaders: tuple[str, ...]
+    game_versions: tuple[str, ...]
+    date_published: str
+
+
+@dataclass(frozen=True)
+class InstallOptions:
+    """Controls which files are downloaded during installation.
+
+    Attributes
+    ----------
+    include_optional:
+        If ``False``, files marked optional by the modpack are skipped.
+        Defaults to ``True``.
+    side:
+        Which side to install for. Files incompatible with the chosen side
+        are skipped. Defaults to ``"client"``.
+    """
+
+    include_optional: bool = True
+    side: Literal["client", "server", "both"] = "client"
+
+
+================================================================================
+# FILE: packlayer\infrastructure\downloader.py
+================================================================================
+
+from __future__ import annotations
+
+import hashlib
+import logging
+from pathlib import Path
+
+import aiofiles
+
+from packlayer.domain.exceptions import HashMismatch
+from packlayer.domain.models import ModFile
+from packlayer.interfaces.downloader import DownloadResult, FileDownloader
+from packlayer.interfaces.http import HttpClient
+
+logger = logging.getLogger("packlayer.downloader")
+
+_CHUNK = 64 * 1024
+
+
+class HttpDownloader(FileDownloader):
+    def __init__(self, http: HttpClient) -> None:
+        self._http = http
+
+    async def download(self, file: ModFile, dest: Path) -> DownloadResult:
+        path = dest / file.filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        logger.debug(f"downloading {file.filename} from {file.url}")
+
+        bytes_written = await self._fetch(file.url, path)
+        if file.hash is not None:
+            logger.debug(f"verifying {file.filename} ({bytes_written} bytes)")
+            self._verify(path, file.hash, file.hash_type)
+        else:
+            logger.debug(f"skipping hash verification for {file.filename}")
+        return DownloadResult(file=file, path=path, bytes_written=bytes_written)
+
+    async def _fetch(self, url: str, path: Path) -> int:
+        written = 0
+        async with aiofiles.open(path, "wb") as f:
+            async for chunk in self._http.get_stream(url):
+                await f.write(chunk)
+                written += len(chunk)
+        return written
+
+    def _verify(self, path: Path, expected: str, hash_type: str | None) -> None:
+        match hash_type:
+            case "sha512":
+                digest = hashlib.sha512()
+            case "sha1":
+                digest = hashlib.sha1()
+            case _:
+                return
+
+        with path.open("rb") as f:
+            while chunk := f.read(_CHUNK):
+                digest.update(chunk)
+
+        if digest.hexdigest() != expected:
+            path.unlink(missing_ok=True)
+            raise HashMismatch(path.name)
+
+
+
+================================================================================
+# FILE: packlayer\infrastructure\http.py
+================================================================================
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import AsyncIterator
+from typing import Any
+
+import aiohttp
+
+from packlayer.domain.config import RetryConfig
+from packlayer.domain.exceptions import NetworkError
+from packlayer.interfaces.http import HttpClient
+from packlayer._version import __version__
+
+logger = logging.getLogger("packlayer.http")
+
+_CHUNK = 64 * 1024
+_USER_AGENT = f"packlayer/{__version__} (github.com/teilorr/packlayer)"
+
+
+class PacklayerHTTP(HttpClient):
+    def __init__(self, retry: RetryConfig | None = None) -> None:
+        self._session: aiohttp.ClientSession | None = None
+        self._retry = retry or RetryConfig()
+
+    async def __aenter__(self) -> PacklayerHTTP:
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=60),
+            headers={"User-Agent": _USER_AGENT},
+        )
+        return self
+
+    async def __aexit__(self, *_) -> None:
+        if self._session:
+            await self._session.close()
+            self._session = None
+
+    async def get_json(
+        self,
+        url: str,
+        params: dict | None = None,
+        headers: dict[str, str] | None = None,
+        json: dict | None = None,
+    ) -> Any:
+        method = "POST" if json is not None else "GET"
+        async with await self._request(
+            method, url, params=params, headers=headers, json=json
+        ) as resp:
+            return await resp.json()
+
+    async def get_bytes(self, url: str) -> bytes:
+        async with await self._request("GET", url) as resp:
+            return await resp.read()
+
+    async def get_stream(self, url: str) -> AsyncIterator[bytes]:
+        if not self._session:
+            raise RuntimeError("PacklayerHTTP must be used as an async context manager")
+        retry = self._retry
+        for attempt in range(retry.max_retries):
+            try:
+                async with self._session.request("GET", url) as resp:
+                    if resp.status not in retry.retryable_statuses:
+                        resp.raise_for_status()
+                        async for chunk in resp.content.iter_chunked(_CHUNK):
+                            yield chunk
+                        return
+
+                    wait = float(resp.headers.get("Retry-After", retry.backoff_base ** attempt))
+                    logger.warning(f"{resp.status} {url} — retrying in {wait:.1f}s")
+                    await asyncio.sleep(wait)
+
+            except aiohttp.ClientError as e:
+                if attempt == retry.max_retries - 1:
+                    logger.debug(f"exception type={type(e).__name__!r} str={str(e)!r} repr={repr(e)}")
+                    raise NetworkError(f"{e} ({url})" if str(e) else url) from e
+
+        raise NetworkError(f"failed after {retry.max_retries} retries: {url}")
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        **kwargs,
+    ) -> aiohttp.ClientResponse:
+        if not self._session:
+            raise RuntimeError("PacklayerHTTP must be used as an async context manager")
+        
+        retry = self._retry
+        try:
+            for attempt in range(retry.max_retries):
+                logger.debug(f"{method} {url} (attempt {attempt + 1}/{retry.max_retries})")
+                resp = await self._session.request(method, url, **kwargs)
+
+                if resp.status not in retry.retryable_statuses:
+                    logger.debug(f"{resp.status} {url}")
+                    resp.raise_for_status()
+                    return resp
+
+                wait = float(resp.headers.get("Retry-After", retry.backoff_base ** attempt))
+                logger.warning(f"{resp.status} {url} — retrying in {wait:.1f}s")
+                await asyncio.sleep(wait)
+
+            raise NetworkError(f"failed after {retry.max_retries} retries: {url}")
+
+        except aiohttp.ClientConnectionError as e:
+            raise NetworkError(f"{e} ({url})" if str(e) else url) from e
+                
+        except aiohttp.ClientResponseError as e:
+            raise NetworkError(f"{e.status} {e.message}: {url}") from e
+
+
+================================================================================
+# FILE: packlayer\infrastructure\installer.py
+================================================================================
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+from packlayer.domain.models import ModFile, Modpack, InstallOptions, Override
+from packlayer.domain.exceptions import NetworkError
+from packlayer.interfaces.downloader import DownloadResult, FileDownloader
+
+_DEFAULT_CONCURRENCY = 8
+
+
+@dataclass
+class InstallResult:
+    """Result of a completed modpack installation.
+
+    Attributes
+    ----------
+    downloads:
+        List of completed mod file downloads.
+    override_count:
+        Number of override files written (configs, scripts, etc.).
+    """
+
+    downloads: list[DownloadResult]
+    override_count: int
+
+    @property
+    def total(self) -> int:
+        """Total number of files installed (mods + overrides)."""
+        return len(self.downloads) + self.override_count
+
+
+class InstallModpack:
+    def __init__(
+        self,
+        downloader: FileDownloader,
+        on_start: Callable[[int], None] | None = None,
+        on_progress: Callable[[], None] | None = None,
+        concurrency: int = _DEFAULT_CONCURRENCY,
+        options: InstallOptions | None = None,
+    ) -> None:
+        self._downloader = downloader
+        self._on_start = on_start
+        self._on_progress = on_progress
+        self._concurrency = concurrency
+        self._options = options or InstallOptions()
+
+    async def install(self, modpack: Modpack, dest: Path) -> InstallResult:
+        mods_dir = dest / "mods"
+        opts = self._options
+
+        files = [
+            f
+            for f in modpack.files
+            if (opts.include_optional or not f.optional)
+            and (f.side == "both" or f.side == opts.side or opts.side == "both")
+        ]
+        applicable_overrides = [
+            o
+            for o in modpack.overrides
+            if o.side == "both" or o.side == opts.side or opts.side == "both"
+        ]
+
+        if self._on_start:
+            self._on_start(len(files) + len(applicable_overrides))
+
+        sem = asyncio.Semaphore(self._concurrency)
+        tasks = [self._download_one(f, mods_dir, sem) for f in files]
+        raw = await asyncio.gather(*tasks, return_exceptions=True)
+
+        errors = [r for r in raw if isinstance(r, BaseException)]
+        if errors:
+            raise errors[0]
+
+        override_count = await self._write_overrides(applicable_overrides, dest)
+        downloads = [r for r in raw if isinstance(r, DownloadResult)]
+
+        return InstallResult(downloads=downloads, override_count=override_count)
+
+    async def _write_overrides(self, overrides: list[Override], dest: Path) -> int:
+        count = 0
+        for override in overrides:
+            out = dest / override.path
+            out.parent.mkdir(parents=True, exist_ok=True)
+            if override.data is not None:
+                out.write_bytes(override.data)
+            elif override.url is not None:
+                override_file = ModFile(url=override.url, filename=out.name, size=0)
+                try:
+                    await self._downloader.download(override_file, out.parent)
+                except NetworkError as e:
+                    raise NetworkError(
+                        f"{override.path}: {override.url} — {e}"
+                    ) from e
+            count += 1
+            if self._on_progress:
+                self._on_progress()
+        return count
+
+    async def _download_one(
+        self, file: ModFile, dest: Path, sem: asyncio.Semaphore
+    ) -> DownloadResult:
+        async with sem:
+            result = await self._downloader.download(file, dest)
+            if self._on_progress:
+                self._on_progress()
+            return result
+
+
+================================================================================
+# FILE: packlayer\interfaces\__init__.py
+================================================================================
+
+from .downloader import DownloadResult, FileDownloader
+from .resolver import ModpackResolver
+from .http import HttpClient
+
+__all__ = (
+    "DownloadResult",
+    "FileDownloader",
+    "ModpackResolver",
+    "HttpClient",
+)
+
+
+
+================================================================================
+# FILE: packlayer\interfaces\downloader.py
+================================================================================
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
+
+from packlayer.domain import ModFile
+
+
+@dataclass(frozen=True)
+class DownloadResult:
+    file: ModFile
+    path: Path
+    bytes_written: int
+
+
+class FileDownloader(ABC):
+    @abstractmethod
+    async def download(self, file: ModFile, dest: Path) -> DownloadResult: ...
+
+
+
+================================================================================
+# FILE: packlayer\interfaces\http.py
+================================================================================
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
+from typing import Any
+
+
+class HttpClient(ABC):
+    @abstractmethod
+    async def get_json(
+        self,
+        url: str,
+        params: dict | None = None,
+        headers: dict[str, str] | None = None,
+        json: dict | None = None,
+    ) -> Any: ...
+
+    @abstractmethod
+    async def get_bytes(self, url: str) -> bytes: ...
+
+    # Intentionally non-async: async generators are plain callables that return
+    # an AsyncIterator — no await needed at the call site. Making this `async def`
+    # would tell type checkers it's a coroutine, breaking `async for` iteration.
+    @abstractmethod
+    def get_stream(self, url: str) -> AsyncIterator[bytes]: ...
+
+
+
+================================================================================
+# FILE: packlayer\interfaces\resolver.py
+================================================================================
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+from packlayer.domain.models import Modpack, ModpackVersion
+
+
+class ModpackResolver(ABC):
+    @abstractmethod
+    def can_handle(self, source: str) -> bool: ...
+
+    @abstractmethod
+    async def resolve(
+        self, source: str, *, modpack_version: str | None = None
+    ) -> Modpack: ...
+
+    @abstractmethod
+    async def fetch_versions(self, source: str) -> list[ModpackVersion]: ...
+
+
+
+================================================================================
+# FILE: packlayer\providers\__init__.py
+================================================================================
+
+from packlayer.providers.modrinth.resolver import ModrinthResolver
+from packlayer.providers.ftb.resolver import FTBResolver
+
+__all__ = (
+    "ModrinthResolver",
+    "FTBResolver",
+)
+
+
+
+================================================================================
+# FILE: packlayer\providers\ftb\__init__.py
+================================================================================
+
+
+
+
+================================================================================
+# FILE: packlayer\providers\ftb\parser.py
+================================================================================
+
+# providers/ftb/parser.py
+from __future__ import annotations
+
+import logging
+from typing import Literal
+
+from packlayer.domain.exceptions import InvalidMrpack
+from packlayer.domain.models import ModFile, Modpack, Override
+
+logger = logging.getLogger("packlayer.ftb.parser")
+
+def parse_modpack(pack: dict, version: dict) -> Modpack:
+    """
+    Build a :class:`Modpack` from FTB API responses.
+
+    Args:
+        pack: Response from ``GET /public/modpack/{packId}``.
+        version: Response from ``GET /public/modpack/{packId}/{versionId}``.
+
+    Raises:
+        InvalidMrpack: Either response is missing required fields.
+    """
+    try:
+        name: str = pack["name"]
+        version_number: str = version["name"]
+        minecraft_version: str = _extract_minecraft_version(version)
+
+        files = []
+        overrides = []
+
+        for f in version.get("files", []):
+            if f.get("serveronly", False):
+                continue
+            
+            side = _parse_side(f)
+            directory: str = f.get("path", "")
+            filename: str = f["name"]
+            full_path = f"{directory}/{filename}" if directory else filename
+            
+            if filename.endswith(".jar") or f.get("url", "").endswith(".jar"):
+                files.append(_parse_file(f, side))
+            else:
+                overrides.append(_parse_override(f, full_path, side))
+
+    except KeyError as e:
+        raise InvalidMrpack(f"malformed FTB API response: {e}") from e
+
+    return Modpack(
+        name=name,
+        version=version_number,
+        minecraft_version=minecraft_version,
+        files=tuple(files),
+        overrides=tuple(overrides),
+    )
+
+def _extract_minecraft_version(version: dict) -> str:
+    for target in version.get("targets", []):
+        if target.get("type") == "game":
+            return target["version"]
+    raise KeyError("minecraft version not found in targets")
+
+def _curseforge_url(f: dict) -> str | None:
+    cf = f.get("curseforge")
+    if not cf:
+        return None
+    file_id = str(cf["file"])
+    return f"https://edge.forgecdn.net/files/{file_id[:-3]}/{file_id[-3:]}/{f['name']}"
+
+def _parse_file(f: dict, side: Literal["client", "server", "both"]) -> ModFile:
+    url = f.get("url") or _curseforge_url(f) or ""
+    return ModFile(
+        url=url,
+        filename=f["name"],
+        size=f.get("size", 0),
+        hash=f.get("sha1"),
+        hash_type="sha1" if f.get("sha1") else None,
+        optional=f.get("optional", False),
+        side=side,
+    )
+def _parse_override(
+    f: dict,
+    path: str,
+    side: Literal["client", "server", "both"],
+) -> Override:
+    return Override(
+        path=path,
+        url=f["url"],
+        side=side,
+    )
+
+def _parse_side(f: dict) -> Literal["client", "server", "both"]:
+    if f.get("clientonly"):
+        return "client"
+
+    if f.get("serveronly"):
+        return "server"
+
+    return "both"
+
+
+
+================================================================================
+# FILE: packlayer\providers\ftb\resolver.py
+================================================================================
+
+# providers/ftb/resolver.py
+from __future__ import annotations
+
+import logging
+
+from datetime import datetime, timezone
+from packlayer.domain.exceptions import (
+    NetworkError,
+    NoVersionFound,
+    SlugNotFound,
+)
+from packlayer.domain.models import Modpack, ModpackVersion
+from packlayer.interfaces.http import HttpClient
+from packlayer.interfaces.resolver import ModpackResolver
+from packlayer.providers.ftb.parser import parse_modpack
+from packlayer.providers.ftb.slug import extract_id, is_ftb_id, is_ftb_url
+from packlayer.types import MinecraftVersion
+
+logger = logging.getLogger("packlayer.ftb")
+
+_API = "https://api.modpacks.ch/public"
+
+
+class FTBResolver(ModpackResolver):
+    """
+    Resolves FTB modpacks from feed-the-beast.com URLs or prefixed IDs (``ftb:<id>``).
+
+    No API key required.
+
+    Args:
+        http: Async HTTP client for API calls.
+        minecraft_version: If provided, filters version listings to only
+            include releases compatible with this Minecraft version.
+    """
+
+    def __init__(
+        self,
+        http: HttpClient,
+        minecraft_version: MinecraftVersion | None = None,
+    ) -> None:
+        self._http = http
+        self._minecraft_version = minecraft_version
+
+    def can_handle(self, source: str) -> bool:
+        return is_ftb_url(source) or is_ftb_id(source)
+
+    async def resolve(
+        self, source: str, *, modpack_version: str | None = None
+    ) -> Modpack:
+        """
+        Resolve a modpack from an FTB URL or prefixed pack ID.
+
+        Args:
+            source: A ``feed-the-beast.com/modpacks/`` URL or ``ftb:<id>``.
+            modpack_version: If provided, resolves this specific version name
+                instead of the latest. Must match a version ``name`` field
+                from the API (e.g. ``"1.8.0"``).
+
+        Raises:
+            SlugNotFound: No FTB pack matches the given ID.
+            NoVersionFound: The pack exists but has no compatible version,
+                or ``modpack_version`` was specified but not found.
+            NetworkError: A network failure occurred.
+        """
+        pack_id = extract_id(source)
+        pack, version = await self._fetch_version_for(pack_id, modpack_version)
+        return parse_modpack(pack, version)
+
+    async def fetch_versions(self, source: str) -> list[ModpackVersion]:
+        """
+        Return all available versions of an FTB modpack, newest-first.
+
+        Args:
+            source: A ``feed-the-beast.com/modpacks/`` URL or ``ftb:<id>``.
+
+        Returns:
+            A list of :class:`ModpackVersion` objects.
+
+        Raises:
+            SlugNotFound: No FTB pack matches the given ID.
+            NoVersionFound: No compatible versions found.
+            NetworkError: A network failure occurred.
+        """
+        pack_id = extract_id(source)
+        pack = await self._fetch_pack(pack_id)
+        versions = self._filter_versions(pack.get("versions", []))
+
+        if not versions:
+            raise NoVersionFound(str(pack_id), self._minecraft_version)
+
+        return [_parse_version(v) for v in reversed(versions)]
+
+    async def _fetch_version_for(
+        self, pack_id: int, modpack_version: str | None
+    ) -> tuple[dict, dict]:
+        pack = await self._fetch_pack(pack_id)
+        versions = self._filter_versions(pack.get("versions", []))
+
+        if not versions:
+            raise NoVersionFound(str(pack_id), self._minecraft_version)
+
+        if modpack_version is not None:
+            match = next((v for v in versions if v["name"] == modpack_version), None)
+            if match is None:
+                raise NoVersionFound(str(pack_id), self._minecraft_version)
+            raw_version = match
+        else:
+            raw_version = versions[-1]  # FTB returns oldest-first
+
+        logger.debug(
+            f"resolving FTB version: {raw_version['name']} (id={raw_version['id']})"
+        )
+        version = await self._fetch_version(pack_id, raw_version["id"])
+        return pack, version
+
+    def _filter_versions(self, versions: list[dict]) -> list[dict]:
+        if not self._minecraft_version:
+            return versions
+        return [
+            v
+            for v in versions
+            if any(
+                t.get("type") == "game" and t.get("version") == self._minecraft_version
+                for t in v.get("targets", [])
+            )
+        ]
+
+    async def _fetch_pack(self, pack_id: int) -> dict:
+        try:
+            return await self._http.get_json(f"{_API}/modpack/{pack_id}")
+        except NetworkError as e:
+            if "404" in str(e):
+                raise SlugNotFound(str(pack_id)) from e
+            raise
+
+    async def _fetch_version(self, pack_id: int, version_id: int) -> dict:
+        try:
+            return await self._http.get_json(f"{_API}/modpack/{pack_id}/{version_id}")
+        except NetworkError as e:
+            if "404" in str(e):
+                raise NoVersionFound(str(pack_id), self._minecraft_version) from e
+            raise
+
+
+def _parse_version(raw: dict) -> ModpackVersion:
+    mc_version = ""
+    for target in raw.get("targets", []):
+        if target.get("type") == "game":
+            mc_version = target.get("version", "")
+            break
+
+    loaders = tuple(
+        target["name"].lower()
+        for target in raw.get("targets", [])
+        if target.get("type") == "modloader"
+    )
+
+    updated = raw.get("updated")
+    if updated:
+        # normalizes to ISO 8601
+        date_published = datetime.fromtimestamp(updated, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    else:
+        date_published = ""
+
+    return ModpackVersion(
+        id=str(raw["id"]),
+        version_number=raw["name"],
+        name=raw["name"],
+        loaders=loaders,
+        game_versions=(mc_version,) if mc_version else (),
+        date_published=date_published,
+    )
+
+
+
+================================================================================
+# FILE: packlayer\providers\ftb\slug.py
+================================================================================
+
+from __future__ import annotations
+
+import re
+
+_FTB_URL_RE = re.compile(
+    r"https?://(?:www\.)?feed-the-beast\.com/modpacks/[^/?#]+-(\d+)"
+)
+_FTB_ID_RE = re.compile(r"^ftb:(\d+)$")
+
+
+def is_ftb_url(source: str) -> bool:
+    return bool(_FTB_URL_RE.match(source))
+
+
+def is_ftb_id(source: str) -> bool:
+    return bool(_FTB_ID_RE.match(source))
+
+
+def extract_id(source: str) -> int:
+    match = _FTB_URL_RE.search(source) or _FTB_ID_RE.match(source)
+    if match:
+        return int(match.group(1))
+    raise ValueError(f"cannot extract FTB pack ID from: {source!r}")
+
+
+
+================================================================================
+# FILE: packlayer\providers\modrinth\__init__.py
+================================================================================
+
+
+
+
+================================================================================
+# FILE: packlayer\providers\modrinth\parser.py
+================================================================================
+
+from __future__ import annotations
+
+import json
+from typing import Literal
+import zipfile
+from io import BytesIO
+from pathlib import Path
+
+from packlayer.domain.exceptions import InvalidMrpack
+from packlayer.domain.models import ModFile, Modpack, Override
+
+_INDEX = "modrinth.index.json"
+
+
+def extract_index(raw: bytes) -> tuple[dict, zipfile.ZipFile]:
+    zf = zipfile.ZipFile(BytesIO(raw))
+    if _INDEX not in zf.namelist():
+        raise ValueError(f"missing {_INDEX} in mrpack")
+    
+    with zf.open(_INDEX) as f:
+        return json.load(f), zf
+
+def parse_modpack(index: dict, zf: zipfile.ZipFile) -> Modpack:
+    try:
+        files = tuple(
+            ModFile(
+                url=entry["downloads"][0],
+                filename=Path(entry["path"]).name,
+                side=_parse_side(entry.get("env", {})),
+                optional=entry.get("env", {}).get("client") == "optional",
+                size=entry["fileSize"],
+                hash=entry["hashes"]["sha512"],
+                hash_type="sha512",
+            )
+            for entry in index.get("files", [])
+            if entry.get("downloads")
+        )
+        overrides = _extract_overrides(zf)
+        return Modpack(
+            name=index["name"],
+            version=index["versionId"],
+            minecraft_version=index["dependencies"]["minecraft"],
+            files=files,
+            overrides=overrides,
+        )
+    except (KeyError, IndexError) as e:
+        raise InvalidMrpack(f"malformed index: {e}") from e
+
+
+def _extract_overrides(zf: zipfile.ZipFile) -> tuple[Override, ...]:
+    result = []
+    for name in zf.namelist():
+        if name.endswith("/"):
+            continue
+        if name.startswith("overrides/"):
+            path, side = name.removeprefix("overrides/"), "both"
+        elif name.startswith("client-overrides/"):
+            path, side = name.removeprefix("client-overrides/"), "client"
+        elif name.startswith("server-overrides/"):
+            path, side = name.removeprefix("server-overrides/"), "server"
+        else:
+            continue
+        result.append(Override(path=path, data=zf.read(name), side=side))
+    return tuple(result)
+
+def _parse_side(env: dict) -> Literal["client", "server", "both"]:
+    client = env.get("client", "required")
+    server = env.get("server", "required")
+    if client == "unsupported":
+        return "server"
+
+    if server == "unsupported":
+        return "client"
+
+    return "both"
+
+
+
+================================================================================
+# FILE: packlayer\providers\modrinth\resolver.py
+================================================================================
+
+from __future__ import annotations
+import logging
+from pathlib import Path
+import aiofiles
+from packlayer.domain.exceptions import (
+    InvalidMrpack,
+    LocalFileNotFound,
+    NoVersionFound,
+    SlugNotFound,
+    NetworkError,
+)
+from packlayer.domain.models import Modpack, ModpackVersion
+from packlayer.interfaces.http import HttpClient
+from packlayer.interfaces.resolver import ModpackResolver
+from packlayer.providers.modrinth.parser import extract_index, parse_modpack
+from packlayer.providers.modrinth.slug import (
+    extract_slug,
+    is_local,
+    is_direct_url,
+    is_modrinth_id,
+)
+from packlayer.types import MinecraftVersion
+
+logger = logging.getLogger("packlayer.modrinth")
+
+_API = "https://api.modrinth.com/v2"
+
+
+class ModrinthResolver(ModpackResolver):
+    """
+    Resolves Modrinth modpacks from multiple source types: local `.mrpack` files,
+    direct download URLs, or Modrinth project slugs/URLs.
+
+    Implements :class:`ModpackResolver` using the Modrinth v2 API and an
+    injected :class:`HttpClient` for all network I/O.
+
+    Args:
+        http: Async HTTP client used for API calls and file downloads.
+        minecraft_version: If provided, filters version listings to only
+            include releases compatible with this Minecraft version
+            (e.g. ``"1.20.1"``). Has no effect on local/URL resolution.
+    """
+
+    def __init__(
+        self,
+        http: HttpClient,
+        minecraft_version: MinecraftVersion | None = None,
+    ) -> None:
+        self._http = http
+        self._minecraft_version = minecraft_version
+
+    def can_handle(self, source: str) -> bool:
+        return (
+            is_local(source)
+            or is_direct_url(source)
+            or "modrinth.com" in source
+            or is_modrinth_id(source)
+        )
+
+    async def resolve(
+        self, source: str, *, modpack_version: str | None = None
+    ) -> Modpack:
+        """
+        Resolve a modpack from ``source``, auto-detecting its type.
+
+        Resolution order:
+        1. **Local path** — if ``source`` looks like a file path, reads it from disk.
+        2. **Direct URL** — if ``source`` is an HTTP(S) URL, downloads it directly.
+        3. **Slug / project URL** — otherwise treats ``source`` as a Modrinth slug
+            or project page URL and fetches the latest compatible version via the API.
+
+        Args:
+            source: A local file path, direct `.mrpack` URL, or Modrinth slug/URL.
+            version: The modpack version you want to resolve to when using a slug.
+
+        Returns:
+            A parsed :class:`Modpack` instance.
+
+        Raises:
+            LocalFileNotFound: The local path does not exist.
+            InvalidMrpack: The file is not a valid `.mrpack` archive.
+            SlugNotFound: No Modrinth project matches the given slug.
+            NoVersionFound: The project exists but has no compatible version.
+            NetworkError: A non-404 network failure occurred.
+        """
+        if is_local(source):
+            return await self._resolve_local(source)
+
+        if is_direct_url(source):
+            return await self._resolve_url(source)
+        return await self._resolve_slug(source, modpack_version=modpack_version)
+
+    async def fetch_versions(self, slug: str) -> list[ModpackVersion]:
+        """
+        Fetch all available modpack versions for a Modrinth project.
+
+        Applies the same loader and Minecraft version filters as :meth:`resolve`.
+        Only versions that include a `.mrpack` file are returned.
+
+        Args:
+            slug: A Modrinth project slug or full project URL.
+
+        Returns:
+            A list of :class:`ModpackVersion` objects, ordered by the API
+            (newest first).
+
+        Raises:
+            SlugNotFound: No project matches the given slug.
+            NoVersionFound: The project exists but has no compatible versions.
+            NetworkError: A non-404 network failure occurred.
+        """
+        raw = await self._fetch_raw_versions(extract_slug(slug))
+        return [_parse_version(v) for v in raw]
+
+    async def _resolve_local(self, source: str) -> Modpack:
+        path = Path(source)
+        if not path.exists():
+            raise LocalFileNotFound(source)
+        raw = await self._read_bytes(path)
+
+        try:
+            index, zf = extract_index(raw)
+        except Exception as e:
+            raise InvalidMrpack(str(e)) from e
+        
+        return parse_modpack(index, zf)
+
+    async def _read_bytes(self, path: Path) -> bytes:
+        async with aiofiles.open(path, "rb") as f:
+            return await f.read()
+
+    async def _resolve_url(self, source: str) -> Modpack:
+        raw = await self._http.get_bytes(source)
+        try:
+            index, zf = extract_index(raw)
+        except Exception as e:
+            raise InvalidMrpack(str(e)) from e
+        return parse_modpack(index, zf)
+
+    async def _resolve_slug(
+        self, source: str, modpack_version: str | None = None
+    ) -> Modpack:
+        slug = extract_slug(source)
+        logger.debug(f"resolved slug: {slug!r}")
+
+        raw_versions = await self._fetch_raw_versions(slug)
+        if modpack_version:
+            selected = next(
+                (v for v in raw_versions if v["version_number"] == modpack_version),
+                None,
+            )
+            if not selected:
+                raise NoVersionFound(slug, self._minecraft_version)
+
+            chosen = selected
+        else:
+            chosen = raw_versions[0]  # latest
+
+        logger.debug(f"selected version: {chosen['version_number']}")
+
+        raw = await self._download_mrpack(chosen)
+        index, zf = extract_index(raw)
+        return parse_modpack(index, zf)
+
+    async def _fetch_raw_versions(self, slug: str) -> list[dict]:
+        params: dict = {"loaders": '["fabric","quilt","forge","neoforge"]'}
+        if self._minecraft_version:
+            params["game_versions"] = f'["{self._minecraft_version}"]'
+
+        try:
+            all_versions = await self._http.get_json(
+                f"{_API}/project/{slug}/version",
+                params=params,
+            )
+        except NetworkError as e:
+            if "404" in str(e):
+                raise SlugNotFound(slug) from e
+            raise
+
+        mrpack_versions = [
+            v
+            for v in all_versions
+            if any(f["filename"].endswith(".mrpack") for f in v.get("files", []))
+        ]
+        if not mrpack_versions:
+            raise NoVersionFound(slug, self._minecraft_version)
+
+        return mrpack_versions
+
+    async def _download_mrpack(self, raw_version: dict) -> bytes:
+        mrpack = next(
+            f for f in raw_version["files"] if f["filename"].endswith(".mrpack")
+        )
+        logger.debug(f"downloading mrpack: {mrpack['filename']}")
+
+        return await self._http.get_bytes(mrpack["url"])
+
+
+def _parse_version(raw: dict) -> ModpackVersion:
+    return ModpackVersion(
+        id=raw["id"],
+        version_number=raw["version_number"],
+        name=raw["name"],
+        loaders=tuple(raw.get("loaders", [])),
+        game_versions=tuple(raw.get("game_versions", [])),
+        date_published=raw["date_published"],
+    )
+
+
+
+================================================================================
+# FILE: packlayer\providers\modrinth\slug.py
+================================================================================
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+_MODRINTH_SLUG_RE = re.compile(r"/(?:modpack|mod|plugin|datapack)/([^/?#]+)")
+_MRPACK_URL_RE = re.compile(r"https?://")
+
+
+def is_local(source: str) -> bool:
+    return source.endswith(".mrpack") or Path(source).exists()
+
+
+def is_direct_url(source: str) -> bool:
+    return bool(_MRPACK_URL_RE.match(source)) and source.endswith(".mrpack")
+
+
+def is_modrinth_id(source: str) -> bool:
+    return source.startswith("mr:")
+
+
+def extract_slug(source: str) -> str:
+    if source.startswith("mr:"):
+        return source[3:]
+    match = _MODRINTH_SLUG_RE.search(source)
+    if match:
+        return match.group(1).rstrip("/")
+    return source
+
+
+
+================================================================================
+# FILE: packlayer\providers\registry.py
+================================================================================
+
+from __future__ import annotations
+from typing import Optional
+
+from packlayer.domain.exceptions import NoResolverFound
+from packlayer.interfaces.resolver import ModpackResolver
+
+
+class ResolverRegistry:
+    """
+    Ordered registry of :class:`~packlayer.interfaces.resolver.ModpackResolver` instances.
+
+    Resolvers are queried in registration order — the first one whose
+    :meth:`~ModpackResolver.can_handle` returns ``True`` wins. Register
+    catch-all resolvers (like :class:`~packlayer.providers.modrinth.ModrinthResolver`)
+    last so they don't shadow more specific ones.
+    """
+
+    def __init__(self, default_resolver: Optional[ModpackResolver] = None) -> None:
+        self._resolvers: list[ModpackResolver] = []
+        self._default = default_resolver
+
+    def register(self, resolver: ModpackResolver) -> None:
+        """Append a resolver to the end of the priority chain."""
+        self._resolvers.append(resolver)
+
+    def set_default_resolver(self, resolver: ModpackResolver) -> None:
+        """Sets a default resolver if none could resolve correctly."""
+        self._default = resolver
+
+    def resolvers(self) -> list[ModpackResolver]:
+        return list(self._resolvers)
+
+    def pick(self, source: str) -> ModpackResolver:
+        """
+        Return the first resolver that can handle ``source``.
+
+        Raises:
+            NoResolverFound: No registered resolver accepted the source.
+        """
+        for resolver in self._resolvers:
+            if resolver.can_handle(source):
+                return resolver
+
+        if self._default:
+            return self._default
+
+        raise NoResolverFound(source)
+
+
+
+================================================================================
+# FILE: packlayer\types.py
+================================================================================
+
+from __future__ import annotations
+
+from typing import Union, Callable, Awaitable
+
+
+type MinecraftVersion = str
+type ProgressCallback = Union[
+    Callable[[], None],
+    Callable[[], Awaitable[None]],
+]
+
+
+
+================================================================================
+# FILE: pyproject.toml
+================================================================================
+
+[project]
+name = "packlayer"
+version = "0.1.0"
+description = "Async minecraft modpack resolver and downloader"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "aiofiles>=25.1.0",
+    "aiohttp>=3.13.5",
+    "rich>=15.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.20.2",
+    "pre-commit>=4.6.0",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.15.12",
+]
+
+[project.scripts]
+packlayer = "packlayer.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel] 
+include = ["packlayer/py.typed"]
+packages = ["packlayer"]
+
+
+
+================================================================================
+# FILE: README.md
+================================================================================
+
+<div align="center">
+
+# packlayer
+
+Resolves and installs Minecraft modpacks from Modrinth slugs, FTB IDs, direct URLs, or local `.mrpack` files.  
+One call. No launcher required.
+
+[![Python](https://img.shields.io/badge/python-3.14%2B-blue?style=flat-square)](https://www.python.org/)
+[![PyPI](https://img.shields.io/pypi/v/packlayer?style=flat-square)](https://pypi.org/project/packlayer/)
+[![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](./LICENSE)
+[![Platform](https://img.shields.io/badge/platform-cross--platform-lightgrey?style=flat-square)]()
+
+<!-- replace with a demo gif once available -->
+
+</div>
+
+---
+
+## What it does
+
+You give it a modpack source — a Modrinth slug, an FTB pack ID, a direct `.mrpack` URL, or a local file — and it resolves the manifest, downloads all mod files concurrently, verifies their integrity, and drops them into a folder. There's a CLI for one-off use and a full async Python API for integration.
+
+The resolver is provider-agnostic by design. Built-in support covers Modrinth and FTB. Additional providers can be plugged in without touching the library.
+
+---
+
+## Installation
+
+```
+pip install packlayer
+```
+
+**Requirements:** Python 3.14+
+
+---
+
+## Usage
+
+### CLI
+
+```
+packlayer install mr:fabulously-optimized
+```
+
+```
+packlayer install https://modrinth.com/modpack/fabulously-optimized
+```
+
+```
+packlayer install ftb:79
+```
+
+```
+packlayer install ./mypack.mrpack
+```
+
+```
+packlayer install mr:fabulously-optimized --minecraft 1.20.1 --dest ./dest
+```
+
+### All options
+
+| Flag | Description |
+|---|---|
+| `--dest <path>` | Output directory (default: `./mods`) |
+| `--version <version>` | Pin a specific modpack version (e.g. `6.0.1`) |
+| `--minecraft <version>` | Filter by Minecraft version (e.g. `1.20.1`) |
+| `--side <client\|server\|both>` | Which side to install for (default: `client`) |
+| `--no-optional` | Skip optional mods |
+| `-v`, `--verbose` | Enable debug logging |
+
+---
+
+## Python API
+
+### One-shot
+
+```python
+import asyncio
+from packlayer import install_modpack
+
+asyncio.run(install_modpack("mr:fabulously-optimized", "./mods"))
+```
+
+### Client
+
+```python
+import asyncio
+from packlayer import PacklayerClient
+
+async def main():
+    async with PacklayerClient(minecraft_version="1.20.1") as client:
+        versions = await client.list_versions("mr:fabulously-optimized")
+        modpack  = await client.resolve("mr:fabulously-optimized", modpack_version=versions[0].version_number)
+        results  = await client.install(modpack, "./mods")
+        print(f"{len(results)} files installed")
+
+asyncio.run(main())
+```
+
+### Progress tracking
+
+```python
+from packlayer import PacklayerClient, ModFile
+
+async def main():
+    async with PacklayerClient() as client:
+        modpack = await client.resolve("mr:fabulously-optimized")
+
+        def on_start(total: int) -> None:
+            print(f"downloading {total} files")
+
+        def on_file(file: ModFile) -> None:
+            print(f"  {file.filename}")
+
+        await client.install(
+            modpack, "./mods",
+            on_start=on_start,
+            on_progress=on_file,
+        )
+```
+
+### Install options
+
+```python
+from packlayer import PacklayerClient, InstallOptions
+
+async def main():
+    async with PacklayerClient() as client:
+        modpack = await client.resolve("ftb:79")
+        await client.install(
+            modpack, "./mods",
+            options=InstallOptions(
+                side="server",
+                include_optional=False,
+            ),
+        )
+```
+
+---
+
+## Reference
+
+### `install_modpack`
+
+```python
+async def install_modpack(
+    source: str,
+    dest: str | PathLike[str],
+    *,
+    minecraft_version: str | None = None,
+    concurrency: int = 8,
+    on_start: Callable[[int], None] | None = None,
+    on_progress: ProgressCallback | None = None,
+    options: InstallOptions | None = None,
+    extra_resolvers: list[ModpackResolver] | None = None,
+    default_resolver: ModpackResolver | None = None,
+) -> InstallResult
+```
+
+| Parameter | Description |
+|---|---|
+| `source` | Local path, direct URL, `mr:<slug>`, Modrinth project URL, or `ftb:<id>` |
+| `dest` | Destination directory. Created if it does not exist |
+| `minecraft_version` | Filter versions by Minecraft version (e.g. `"1.20.1"`) |
+| `concurrency` | Max simultaneous downloads. Default: `8` |
+| `on_start` | Callback invoked with the total file count before downloading starts |
+| `on_progress` | Callback invoked after each downloaded file (sync or async) |
+| `options` | Controls which files are installed. See `InstallOptions` |
+| `extra_resolvers` | Additional resolvers registered before built-ins |
+| `default_resolver` | Fallback resolver when no registered resolver claims the source |
+
+### `PacklayerClient`
+
+```python
+class PacklayerClient:
+    def __init__(
+        self,
+        *,
+        minecraft_version: str | None = None,
+        concurrency: int = 8,
+        extra_resolvers: list[ModpackResolver] | None = None,
+        default_resolver: ModpackResolver | None = None,
+    ) -> None
+```
+
+Must be used as an async context manager.
+
+| Method | Description |
+|---|---|
+| `resolve(source, *, modpack_version)` | Resolve a modpack without downloading files |
+| `install(source, dest, *, on_start, on_progress, options)` | Resolve and install a modpack |
+| `list_versions(source)` | Return available versions, newest-first |
+| `resolver_for(source)` | Return the resolver that would handle `source` |
+| `resolvers()` | Return all registered resolvers in priority order |
+
+### Models
+
+**`Modpack`**
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `str` | Display name |
+| `version` | `str` | Version string |
+| `minecraft_version` | `str` | Target Minecraft version |
+| `files` | `tuple[ModFile, ...]` | Files to be downloaded |
+
+**`ModFile`**
+
+| Field | Type | Description |
+|---|---|---|
+| `url` | `str` | Download URL |
+| `filename` | `str` | Bare filename |
+| `size` | `int` | Expected file size in bytes |
+| `hash` | `str \| None` | Hex digest, verified post-download if provided |
+| `hash_type` | `"sha512" \| "sha1" \| None` | Algorithm used for `hash` |
+| `optional` | `bool` | Whether the file is optional |
+| `side` | `"client" \| "server" \| "both"` | Which side this file targets |
+
+**`ModpackVersion`**
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `str` | Provider-assigned version ID |
+| `version_number` | `str` | Human-readable version string |
+| `name` | `str` | Release display name |
+| `loaders` | `tuple[str, ...]` | Supported mod loaders |
+| `game_versions` | `tuple[str, ...]` | Compatible Minecraft versions |
+| `date_published` | `str` | ISO 8601 publish timestamp |
+
+**`InstallOptions`**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `include_optional` | `bool` | `True` | If `False`, optional files are skipped |
+| `side` | `"client" \| "server" \| "both"` | `"client"` | Files incompatible with this side are skipped |
+
+### Exceptions
+
+All exceptions inherit from `PacklayerError`.
+
+| Exception | Description |
+|---|---|
+| `LocalFileNotFound` | Local path does not exist |
+| `InvalidMrpack` | File is not a valid `.mrpack` archive |
+| `SlugNotFound` | No project matches the given slug or ID |
+| `NoVersionFound` | Project exists but has no compatible version |
+| `HashMismatch` | Hash digest mismatch after download |
+| `NetworkError` | Network failure |
+| `NoResolverFound` | No registered resolver claimed the source |
+
+---
+
+## Supported providers
+
+| Provider | Source format | Auth required |
+|---|---|---|
+| Modrinth | `mr:<slug>`, Modrinth project URL, direct `.mrpack` URL, local `.mrpack` | No |
+| FTB | `ftb:<id>`, `feed-the-beast.com` URL | No |
+
+---
+
+## Plugin system
+
+packlayer dispatches resolution to a registry of `ModpackResolver` instances. `extra_resolvers` are registered before built-ins, giving them higher priority.
+
+### Implementing a resolver
+
+```python
+from packlayer.interfaces.resolver import ModpackResolver
+from packlayer.domain.models import Modpack, ModpackVersion
+
+class MyResolver(ModpackResolver):
+    def can_handle(self, source: str) -> bool:
+        return "myprovider.com" in source
+
+    async def resolve(self, source: str, *, modpack_version: str | None = None) -> Modpack:
+        ...
+
+    async def fetch_versions(self, source: str) -> list[ModpackVersion]:
+        ...
+```
+
+`can_handle` must be exclusive — return `True` only for sources this resolver definitively owns.
+
+### Registering
+
+```python
+async with PacklayerClient(extra_resolvers=[MyResolver()]) as client:
+    modpack = await client.resolve("https://myprovider.com/modpacks/mypack")
+    await client.install(modpack, "./mods")
+```
+
+---
+
+
+
+================================================================================
+# FILE: tests\test_packlayer.py
+================================================================================
+
+from __future__ import annotations
+
+import pytest
+import pytest_asyncio
+
+from packlayer import PacklayerClient
+from packlayer.domain.exceptions import NoResolverFound, SlugNotFound, NoVersionFound
+from packlayer.domain.models import InstallOptions, Modpack, ModpackVersion
+from packlayer.interfaces.resolver import ModpackResolver
+
+
+_FAKE_PACKS: dict[str, Modpack] = {
+    "hello": Modpack(
+        name="Hello Pack",
+        version="1.0.0",
+        minecraft_version="1.20.1",
+        files=(),
+    ),
+    "world": Modpack(
+        name="World Pack",
+        version="2.0.0",
+        minecraft_version="1.21.0",
+        files=(),
+    ),
+}
+
+_FAKE_VERSIONS: dict[str, list[ModpackVersion]] = {
+    "hello": [
+        ModpackVersion(
+            id="fake-0002",
+            version_number="1.0.0",
+            name="1.0.0",
+            loaders=("fabric",),
+            game_versions=("1.20.1",),
+            date_published="2024-06-01T00:00:00Z",
+        ),
+        ModpackVersion(
+            id="fake-0001",
+            version_number="0.9.0",
+            name="0.9.0",
+            loaders=("fabric",),
+            game_versions=("1.19.4",),
+            date_published="2024-01-01T00:00:00Z",
+        ),
+    ],
+}
+
+
+class FakeResolver(ModpackResolver):
+    """Handles ``test:<name>`` sources. No network calls."""
+
+    def can_handle(self, source: str) -> bool:
+        return source.startswith("test:")
+
+    async def resolve(
+        self, source: str, *, modpack_version: str | None = None
+    ) -> Modpack:
+        name = source.removeprefix("test:")
+        if name not in _FAKE_PACKS:
+            raise SlugNotFound(name)
+        pack = _FAKE_PACKS[name]
+        if modpack_version and pack.version != modpack_version:
+            raise NoVersionFound(name, None)
+        return pack
+
+    async def fetch_versions(self, source: str) -> list[ModpackVersion]:
+        name = source.removeprefix("test:")
+        if name not in _FAKE_VERSIONS:
+            raise SlugNotFound(name)
+        return _FAKE_VERSIONS[name]
+
+
+@pytest_asyncio.fixture
+async def client():
+    async with PacklayerClient(extra_resolvers=[FakeResolver()]) as c:
+        yield c
+
+
+@pytest_asyncio.fixture
+async def plain_client():
+    """Client with no extra resolvers."""
+    async with PacklayerClient() as c:
+        yield c
+
+
+class TestPluginSystem:
+    def test_resolver_order(self, client: PacklayerClient) -> None:
+        names = [type(r).__name__ for r in client.resolvers()]
+        assert names[0] == "FakeResolver", "extra_resolvers must be registered first"
+
+    def test_resolver_for_fake(self, client: PacklayerClient) -> None:
+        assert isinstance(client.resolver_for("test:hello"), FakeResolver)
+
+    def test_resolver_for_modrinth(self, client: PacklayerClient) -> None:
+        from packlayer.providers.modrinth.resolver import ModrinthResolver
+
+        assert isinstance(
+            client.resolver_for("mr:fabulously-optimized"), ModrinthResolver
+        )
+
+    def test_resolver_for_ftb(self, client: PacklayerClient) -> None:
+        from packlayer.providers.ftb.resolver import FTBResolver
+
+        assert isinstance(client.resolver_for("ftb:79"), FTBResolver)
+
+    def test_no_resolver_found(self, client: PacklayerClient) -> None:
+        with pytest.raises(NoResolverFound):
+            client.resolver_for("unknown://something")
+
+    def test_fake_takes_priority_over_builtins(self, client: PacklayerClient) -> None:
+        assert type(client.resolver_for("test:hello")).__name__ == "FakeResolver"
+
+    @pytest.mark.asyncio
+    async def test_resolve(self, client: PacklayerClient) -> None:
+        modpack = await client.resolve("test:hello")
+        assert modpack.name == "Hello Pack"
+        assert modpack.version == "1.0.0"
+
+    @pytest.mark.asyncio
+    async def test_resolve_all_packs(self, client: PacklayerClient) -> None:
+        for key, expected in _FAKE_PACKS.items():
+            modpack = await client.resolve(f"test:{key}")
+            assert modpack.name == expected.name
+
+    @pytest.mark.asyncio
+    async def test_resolve_pinned_version(self, client: PacklayerClient) -> None:
+        modpack = await client.resolve("test:hello", modpack_version="1.0.0")
+        assert modpack.version == "1.0.0"
+
+    @pytest.mark.asyncio
+    async def test_resolve_pinned_version_not_found(
+        self, client: PacklayerClient
+    ) -> None:
+        with pytest.raises(NoVersionFound):
+            await client.resolve("test:hello", modpack_version="99.0.0")
+
+    @pytest.mark.asyncio
+    async def test_resolve_slug_not_found(self, client: PacklayerClient) -> None:
+        with pytest.raises(SlugNotFound):
+            await client.resolve("test:doesnotexist")
+
+    @pytest.mark.asyncio
+    async def test_list_versions(self, client: PacklayerClient) -> None:
+        versions = await client.list_versions("test:hello")
+        assert len(versions) == 2
+        assert versions[0].version_number == "1.0.0"
+        assert versions[1].version_number == "0.9.0"
+
+
+class TestInstallOptions:
+    def test_defaults(self) -> None:
+        opts = InstallOptions()
+        assert opts.include_optional is True
+        assert opts.side == "client"
+
+    def test_server_side(self) -> None:
+        assert InstallOptions(side="server").side == "server"
+
+    def test_both_side(self) -> None:
+        assert InstallOptions(side="both").side == "both"
+
+    def test_no_optional(self) -> None:
+        assert InstallOptions(include_optional=False).include_optional is False
+
+
+class TestModrinth:
+    @pytest.mark.asyncio
+    async def test_list_versions(self, plain_client: PacklayerClient) -> None:
+        versions = await plain_client.list_versions("mr:fabulously-optimized")
+        assert len(versions) > 0
+        assert all(v.version_number for v in versions)
+
+    @pytest.mark.asyncio
+    async def test_resolve_latest(self, plain_client: PacklayerClient) -> None:
+        modpack = await plain_client.resolve("mr:fabulously-optimized")
+        assert modpack.name
+        assert modpack.minecraft_version
+        assert len(modpack.files) > 0
+
+    @pytest.mark.asyncio
+    async def test_resolve_pinned(self, plain_client: PacklayerClient) -> None:
+        versions = await plain_client.list_versions("mr:fabulously-optimized")
+        pinned = versions[-1].version_number
+        modpack = await plain_client.resolve(
+            "mr:fabulously-optimized", modpack_version=pinned
+        )
+        assert modpack.version == pinned
+
+    @pytest.mark.asyncio
+    async def test_resolve_url(self, plain_client: PacklayerClient) -> None:
+        modpack = await plain_client.resolve(
+            "https://modrinth.com/modpack/fabulously-optimized"
+        )
+        assert modpack.name
+
+    @pytest.mark.asyncio
+    async def test_slug_not_found(self, plain_client: PacklayerClient) -> None:
+        with pytest.raises(SlugNotFound):
+            await plain_client.resolve("mr:this-pack-does-not-exist-xyz")
+
+
+class TestFTB:
+    @pytest.mark.asyncio
+    async def test_list_versions(self, plain_client: PacklayerClient) -> None:
+        versions = await plain_client.list_versions("ftb:79")
+        assert len(versions) > 0
+
+    @pytest.mark.asyncio
+    async def test_resolve_latest(self, plain_client: PacklayerClient) -> None:
+        modpack = await plain_client.resolve("ftb:79")
+        assert modpack.name
+        assert modpack.minecraft_version
+        assert len(modpack.files) > 0
+
+    @pytest.mark.asyncio
+    async def test_resolve_pinned(self, plain_client: PacklayerClient) -> None:
+        versions = await plain_client.list_versions("ftb:79")
+        pinned = versions[-1].version_number
+        modpack = await plain_client.resolve("ftb:79", modpack_version=pinned)
+        assert modpack.version == pinned
+
+    @pytest.mark.asyncio
+    async def test_pack_not_found(self, plain_client: PacklayerClient) -> None:
+        with pytest.raises(NoVersionFound):
+            await plain_client.resolve("ftb:999999999")
+
+
