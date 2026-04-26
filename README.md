@@ -36,23 +36,23 @@ pip install packlayer
 
 ### CLI
 
-```
+```bash
 packlayer install mr:fabulously-optimized
 ```
 
-```
+```bash
 packlayer install https://modrinth.com/modpack/fabulously-optimized
 ```
 
-```
+```bash
 packlayer install ftb:79
 ```
 
-```
+```bash
 packlayer install ./mypack.mrpack
 ```
 
-```
+```bash
 packlayer install mr:fabulously-optimized --minecraft 1.20.1 --dest ./dest
 ```
 
@@ -77,7 +77,7 @@ packlayer install mr:fabulously-optimized --minecraft 1.20.1 --dest ./dest
 import asyncio
 from packlayer import install_modpack
 
-asyncio.run(install_modpack("mr:fabulously-optimized", "./mods"))
+asyncio.run(install_modpack("mr:fabulously-optimized", "./dest"))
 ```
 
 ### Client
@@ -90,7 +90,7 @@ async def main():
     async with PacklayerClient(minecraft_version="1.20.1") as client:
         versions = await client.list_versions("mr:fabulously-optimized")
         modpack  = await client.resolve("mr:fabulously-optimized", modpack_version=versions[0].version_number)
-        results  = await client.install(modpack, "./mods")
+        results  = await client.install(modpack, "./dest")
         print(f"{results.total} files installed")
 
 asyncio.run(main())
@@ -112,7 +112,7 @@ async def main():
             print(".", end="", flush=True)
 
         await client.install(
-            modpack, "./mods",
+            modpack, "./dest",
             on_start=on_start,
             on_progress=on_progress,
         )
@@ -129,7 +129,7 @@ async def main():
     async with PacklayerClient() as client:
         modpack = await client.resolve("ftb:79")
         await client.install(
-            modpack, "./mods",
+            modpack, "./dest",
             options=InstallOptions(
                 side="server",
                 include_optional=False,
