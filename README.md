@@ -10,8 +10,6 @@ One call. No launcher required.
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-cross--platform-lightgrey?style=flat-square)]()
 
-<!-- replace with a demo gif once available -->
-
 </div>
 
 ---
@@ -62,7 +60,7 @@ packlayer install mr:fabulously-optimized --minecraft 1.20.1 --dest ./dest
 
 | Flag | Description |
 |---|---|
-| `--dest <path>` | Output directory (default: `./mods`) |
+| `--dest <path>` | Output directory (default: `./dest`) |
 | `--version <version>` | Pin a specific modpack version (e.g. `6.0.1`) |
 | `--minecraft <version>` | Filter by Minecraft version (e.g. `1.20.1`) |
 | `--side <client\|server\|both>` | Which side to install for (default: `client`) |
@@ -93,7 +91,7 @@ async def main():
         versions = await client.list_versions("mr:fabulously-optimized")
         modpack  = await client.resolve("mr:fabulously-optimized", modpack_version=versions[0].version_number)
         results  = await client.install(modpack, "./mods")
-        print(f"{len(results)} files installed")
+        print(f"{results.total} files installed")
 
 asyncio.run(main())
 ```
@@ -101,7 +99,7 @@ asyncio.run(main())
 ### Progress tracking
 
 ```python
-from packlayer import PacklayerClient, ModFile
+from packlayer import PacklayerClient
 
 async def main():
     async with PacklayerClient() as client:
@@ -110,15 +108,17 @@ async def main():
         def on_start(total: int) -> None:
             print(f"downloading {total} files")
 
-        def on_file(file: ModFile) -> None:
-            print(f"  {file.filename}")
+        def on_progress() -> None:
+            print(".", end="", flush=True)
 
         await client.install(
             modpack, "./mods",
             on_start=on_start,
-            on_progress=on_file,
+            on_progress=on_progress,
         )
 ```
+
+`on_progress` is called once per installed file (mods and overrides). Both sync and async callables are accepted.
 
 ### Install options
 
@@ -149,6 +149,7 @@ async def install_modpack(
     dest: str | PathLike[str],
     *,
     minecraft_version: str | None = None,
+    modpack_version: str | None = None,
     concurrency: int = 8,
     on_start: Callable[[int], None] | None = None,
     on_progress: ProgressCallback | None = None,
@@ -163,9 +164,10 @@ async def install_modpack(
 | `source` | Local path, direct URL, `mr:<slug>`, Modrinth project URL, or `ftb:<id>` |
 | `dest` | Destination directory. Created if it does not exist |
 | `minecraft_version` | Filter versions by Minecraft version (e.g. `"1.20.1"`) |
+| `modpack_version` | Pin a specific modpack version (e.g. `"6.0.1"`). Uses latest if omitted |
 | `concurrency` | Max simultaneous downloads. Default: `8` |
 | `on_start` | Callback invoked with the total file count before downloading starts |
-| `on_progress` | Callback invoked after each downloaded file (sync or async) |
+| `on_progress` | Callback invoked after each installed file (sync or async, no arguments) |
 | `options` | Controls which files are installed. See `InstallOptions` |
 | `extra_resolvers` | Additional resolvers registered before built-ins |
 | `default_resolver` | Fallback resolver when no registered resolver claims the source |
@@ -181,6 +183,7 @@ class PacklayerClient:
         concurrency: int = 8,
         extra_resolvers: list[ModpackResolver] | None = None,
         default_resolver: ModpackResolver | None = None,
+        config: PacklayerConfig | None = None,
     ) -> None
 ```
 
@@ -189,7 +192,7 @@ Must be used as an async context manager.
 | Method | Description |
 |---|---|
 | `resolve(source, *, modpack_version)` | Resolve a modpack without downloading files |
-| `install(source, dest, *, on_start, on_progress, options)` | Resolve and install a modpack |
+| `install(modpack, dest, *, on_start, on_progress, options)` | Install a resolved modpack to disk |
 | `list_versions(source)` | Return available versions, newest-first |
 | `resolver_for(source)` | Return the resolver that would handle `source` |
 | `resolvers()` | Return all registered resolvers in priority order |
@@ -203,7 +206,8 @@ Must be used as an async context manager.
 | `name` | `str` | Display name |
 | `version` | `str` | Version string |
 | `minecraft_version` | `str` | Target Minecraft version |
-| `files` | `tuple[ModFile, ...]` | Files to be downloaded |
+| `files` | `tuple[ModFile, ...]` | Mod files to be downloaded |
+| `overrides` | `tuple[Override, ...]` | Non-mod files to be written into the instance directory |
 
 **`ModFile`**
 
@@ -216,6 +220,15 @@ Must be used as an async context manager.
 | `hash_type` | `"sha512" \| "sha1" \| None` | Algorithm used for `hash` |
 | `optional` | `bool` | Whether the file is optional |
 | `side` | `"client" \| "server" \| "both"` | Which side this file targets |
+
+**`Override`**
+
+| Field | Type | Description |
+|---|---|---|
+| `path` | `str` | Destination path relative to the instance root (e.g. `"config/sodium.json"`) |
+| `side` | `"client" \| "server" \| "both"` | Which side this override applies to |
+| `data` | `bytes \| None` | Raw file contents bundled inline (e.g. from `.mrpack` zips). Mutually exclusive with `url` |
+| `url` | `str \| None` | Remote URL to fetch the file from (e.g. FTB overrides). Mutually exclusive with `data` |
 
 **`ModpackVersion`**
 
@@ -245,9 +258,9 @@ All exceptions inherit from `PacklayerError`.
 | `InvalidMrpack` | File is not a valid `.mrpack` archive |
 | `SlugNotFound` | No project matches the given slug or ID |
 | `NoVersionFound` | Project exists but has no compatible version |
+| `NoResolverFound` | No registered resolver claimed the source |
 | `HashMismatch` | Hash digest mismatch after download |
 | `NetworkError` | Network failure |
-| `NoResolverFound` | No registered resolver claimed the source |
 
 ---
 
