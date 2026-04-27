@@ -14,7 +14,7 @@ class DownloadResult:
     Attributes
     ----------
     file:
-        The :class:`ModFile` associated with this download.
+        The [`ModFile`][ModFile] associated with this download.
     path:
         Filesystem path where the file was written.
     bytes_written:

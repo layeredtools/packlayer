@@ -94,14 +94,14 @@ class ModrinthResolver(ModpackResolver):
         """
         Fetch all available modpack versions for a Modrinth project.
 
-        Applies the same loader and Minecraft version filters as :meth:`resolve`.
+        Applies the same loader and Minecraft version filters as [`resolve`][resolve].
         Only versions that include a `.mrpack` file are returned.
 
         Args:
             slug: A Modrinth project slug or full project URL.
 
         Returns:
-            A list of :class:`ModpackVersion` objects, ordered by the API
+            A list of [`ModpackVersion`][ModpackVersion] objects, ordered by the API
             (newest first).
 
         Raises:

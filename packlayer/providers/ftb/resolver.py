@@ -74,7 +74,7 @@ class FTBResolver(ModpackResolver):
             source: A ``feed-the-beast.com/modpacks/`` URL or ``ftb:<id>``.
 
         Returns:
-            A list of :class:`ModpackVersion` objects.
+            A list of [`ModpackVersion`][ModpackVersion] objects.
 
         Raises:
             SlugNotFound: No FTB pack matches the given ID.

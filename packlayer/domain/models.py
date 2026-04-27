@@ -80,10 +80,10 @@ class Modpack:
     minecraft_version:
         The Minecraft version this modpack targets (e.g. ``"1.20.1"``).
     files:
-        Immutable sequence of :class:`ModFile` entries to be downloaded.
+        Immutable sequence of [`ModFile`][ModFile] entries to be downloaded.
         Empty by default for modpacks that declare no files.
     overrides:
-        Immutable sequence of :class:`Override` entries to be written to the
+        Immutable sequence of [`Override`][Override] entries to be written to the
         instance directory. Empty by default.
     """
 
@@ -98,9 +98,9 @@ class Modpack:
 class ModpackVersion:
     """Metadata for a single releasable version of a modpack.
 
-    Returned by :meth:`~packlayer.PacklayerClient.list_versions`. Use
+    Returned by [`list_versions`][packlayer.PacklayerClient.list_versions]. Use
     ``version_number`` to pin a specific release when calling
-    :meth:`~packlayer.PacklayerClient.resolve`.
+    [`resolve`][packlayer.PacklayerClient.resolve].
 
     Attributes
     ----------

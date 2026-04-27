@@ -87,12 +87,14 @@ class InstallModpack:
             out.parent.mkdir(parents=True, exist_ok=True)
             if override.data is not None:
                 out.write_bytes(override.data)
+
             elif override.url is not None:
                 override_file = ModFile(url=override.url, filename=out.name, size=0)
                 try:
                     await self._downloader.download(override_file, out.parent)
                 except NetworkError as e:
                     raise NetworkError(f"{override.path}: {override.url} — {e}") from e
+
             count += 1
             if self._on_progress:
                 self._on_progress()

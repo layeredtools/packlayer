@@ -7,11 +7,11 @@ from packlayer.interfaces.resolver import ModpackResolver
 
 class ResolverRegistry:
     """
-    Ordered registry of :class:`~packlayer.interfaces.resolver.ModpackResolver` instances.
+    Ordered registry of [`ModpackResolver`][packlayer.interfaces.resolver.ModpackResolver] instances.
 
     Resolvers are queried in registration order — the first one whose
-    :meth:`~ModpackResolver.can_handle` returns ``True`` wins. Register
-    catch-all resolvers (like :class:`~packlayer.providers.modrinth.ModrinthResolver`)
+    [`can_handle`][ModpackResolver.can_handle] returns ``True`` wins. Register
+    catch-all resolvers (like [`ModrinthResolver`][packlayer.providers.modrinth.ModrinthResolver])
     last so they don't shadow more specific ones.
     """
 

@@ -12,7 +12,7 @@ logger = logging.getLogger("packlayer.ftb.parser")
 
 def parse_modpack(pack: dict, version: dict) -> Modpack:
     """
-    Build a :class:`Modpack` from FTB API responses.
+    Build a [`Modpack`][Modpack] from FTB API responses.
 
     Args:
         pack: Response from ``GET /public/modpack/{packId}``.

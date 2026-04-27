@@ -194,7 +194,7 @@ class PacklayerClient:
         Parameters
         ----------
         modpack:
-            A resolved :class:`~packlayer.Modpack` from :meth:`resolve`.
+            A resolved [`Modpack`][packlayer.Modpack] from [`resolve`][resolve].
         dest:
             Instance root directory. Created if it does not exist. Mods go
             into ``dest/mods/``; overrides are written relative to ``dest/``.
@@ -205,7 +205,7 @@ class PacklayerClient:
             Optional callback invoked after each file is installed (both mods
             and overrides). Sync and async callables are both accepted.
         options:
-            Controls which files are downloaded. See :class:`~packlayer.InstallOptions`.
+            Controls which files are downloaded. See [`InstallOptions`][packlayer.InstallOptions].
 
         Returns
         -------
