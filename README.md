@@ -2,10 +2,10 @@
 
 # packlayer
 
-Resolves and installs Minecraft modpacks from Modrinth slugs, FTB IDs, direct URLs, or local `.mrpack` files.  
-One call. No launcher required.
+Async Python library for resolving and installing Minecraft modpacks.  
+Embed it in your launcher, server panel, or automation scripts.
 
-[![Python](https://img.shields.io/badge/python-3.14%2B-blue?style=flat-square)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue?style=flat-square)](https://www.python.org/)
 [![PyPI](https://img.shields.io/pypi/v/packlayer?style=flat-square)](https://pypi.org/project/packlayer/)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-cross--platform-lightgrey?style=flat-square)]()
@@ -14,11 +14,9 @@ One call. No launcher required.
 
 ---
 
-## What it does
+Supports Modrinth slugs, FTB pack IDs, direct `.mrpack` URLs, and local files. Handles concurrent downloads, hash verification, overrides, and client/server filtering. The resolver is pluggable — additional providers can be added without touching the library.
 
-You give it a modpack source — a Modrinth slug, an FTB pack ID, a direct `.mrpack` URL, or a local file — and it resolves the manifest, downloads all mod files concurrently, verifies their integrity, and drops them into a folder. There's a CLI for one-off use and a full async Python API for integration.
-
-The resolver is provider-agnostic by design. Built-in support covers Modrinth and FTB. Additional providers can be plugged in without touching the library.
+If you just want a CLI tool to install modpacks without writing any code, [mrpack-install](https://github.com/nothub/mrpack-install) is the right choice — it ships as a standalone binary with no runtime required. packlayer is for when you need modpack resolution and installation embedded in a Python project.
 
 ---
 
@@ -28,44 +26,7 @@ The resolver is provider-agnostic by design. Built-in support covers Modrinth an
 pip install packlayer
 ```
 
-**Requirements:** Python 3.14+
-
----
-
-## Usage
-
-### CLI
-
-```bash
-packlayer install mr:fabulously-optimized
-```
-
-```bash
-packlayer install https://modrinth.com/modpack/fabulously-optimized
-```
-
-```bash
-packlayer install ftb:79
-```
-
-```bash
-packlayer install ./mypack.mrpack
-```
-
-```bash
-packlayer install mr:fabulously-optimized --minecraft 1.20.1 --dest ./dest
-```
-
-### All options
-
-| Flag | Description |
-|---|---|
-| `--dest <path>` | Output directory (default: `./dest`) |
-| `--version <version>` | Pin a specific modpack version (e.g. `6.0.1`) |
-| `--minecraft <version>` | Filter by Minecraft version (e.g. `1.20.1`) |
-| `--side <client\|server\|both>` | Which side to install for (default: `client`) |
-| `--no-optional` | Skip optional mods |
-| `-v`, `--verbose` | Enable debug logging |
+**Requirements:** Python 3.12+
 
 ---
 
@@ -77,7 +38,7 @@ packlayer install mr:fabulously-optimized --minecraft 1.20.1 --dest ./dest
 import asyncio
 from packlayer import install_modpack
 
-asyncio.run(install_modpack("mr:fabulously-optimized", "./dest"))
+asyncio.run(install_modpack("mr:fabulously-optimized", "./instance"))
 ```
 
 ### Client
@@ -90,8 +51,8 @@ async def main():
     async with PacklayerClient(minecraft_version="1.20.1") as client:
         versions = await client.list_versions("mr:fabulously-optimized")
         modpack  = await client.resolve("mr:fabulously-optimized", modpack_version=versions[0].version_number)
-        results  = await client.install(modpack, "./dest")
-        print(f"{results.total} files installed")
+        result   = await client.install(modpack, "./instance")
+        print(f"{result.total} files installed ({len(result.downloads)} mods, {result.override_count} overrides)")
 
 asyncio.run(main())
 ```
@@ -112,7 +73,7 @@ async def main():
             print(".", end="", flush=True)
 
         await client.install(
-            modpack, "./dest",
+            modpack, "./instance",
             on_start=on_start,
             on_progress=on_progress,
         )
@@ -129,13 +90,38 @@ async def main():
     async with PacklayerClient() as client:
         modpack = await client.resolve("ftb:79")
         await client.install(
-            modpack, "./dest",
+            modpack, "./instance",
             options=InstallOptions(
                 side="server",
                 include_optional=False,
             ),
         )
 ```
+
+### Plugin system
+
+packlayer dispatches resolution to a registry of `ModpackResolver` instances. `extra_resolvers` are registered before built-ins, giving them higher priority.
+
+```python
+from packlayer.interfaces.resolver import ModpackResolver
+from packlayer.domain.models import Modpack, ModpackVersion
+
+class MyResolver(ModpackResolver):
+    def can_handle(self, source: str) -> bool:
+        return "myprovider.com" in source
+
+    async def resolve(self, source: str, *, modpack_version: str | None = None) -> Modpack:
+        ...
+
+    async def fetch_versions(self, source: str) -> list[ModpackVersion]:
+        ...
+
+async with PacklayerClient(extra_resolvers=[MyResolver()]) as client:
+    modpack = await client.resolve("https://myprovider.com/modpacks/mypack")
+    await client.install(modpack, "./instance")
+```
+
+`can_handle` must be exclusive — return `True` only for sources this resolver definitively owns.
 
 ---
 
@@ -273,35 +259,22 @@ All exceptions inherit from `PacklayerError`.
 
 ---
 
-## Plugin system
+## CLI
 
-packlayer dispatches resolution to a registry of `ModpackResolver` instances. `extra_resolvers` are registered before built-ins, giving them higher priority.
+A CLI is included for quick one-off installs. For production use, the Python API gives you full control.
 
-### Implementing a resolver
-
-```python
-from packlayer.interfaces.resolver import ModpackResolver
-from packlayer.domain.models import Modpack, ModpackVersion
-
-class MyResolver(ModpackResolver):
-    def can_handle(self, source: str) -> bool:
-        return "myprovider.com" in source
-
-    async def resolve(self, source: str, *, modpack_version: str | None = None) -> Modpack:
-        ...
-
-    async def fetch_versions(self, source: str) -> list[ModpackVersion]:
-        ...
+```
+packlayer install mr:fabulously-optimized
+packlayer install ftb:79
+packlayer install ./mypack.mrpack
+packlayer install mr:fabulously-optimized --minecraft 1.20.1 --dest ./instance
 ```
 
-`can_handle` must be exclusive — return `True` only for sources this resolver definitively owns.
-
-### Registering
-
-```python
-async with PacklayerClient(extra_resolvers=[MyResolver()]) as client:
-    modpack = await client.resolve("https://myprovider.com/modpacks/mypack")
-    await client.install(modpack, "./mods")
-```
-
----
+| Flag | Description |
+|---|---|
+| `--dest <path>` | Output directory (default: `./dest`) |
+| `--version <version>` | Pin a specific modpack version (e.g. `6.0.1`) |
+| `--minecraft <version>` | Filter by Minecraft version (e.g. `1.20.1`) |
+| `--side <client\|server\|both>` | Which side to install for (default: `client`) |
+| `--no-optional` | Skip optional mods |
+| `-v`, `--verbose` | Enable debug logging |
