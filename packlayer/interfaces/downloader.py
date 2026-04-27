@@ -9,6 +9,18 @@ from packlayer.domain import ModFile
 
 @dataclass(frozen=True)
 class DownloadResult:
+    """Represents the outcome of a single file download.
+
+    Attributes
+    ----------
+    file:
+        The :class:`ModFile` associated with this download.
+    path:
+        Filesystem path where the file was written.
+    bytes_written:
+        Total number of bytes written to disk.
+    """
+
     file: ModFile
     path: Path
     bytes_written: int

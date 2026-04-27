@@ -21,5 +21,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
       - name: Build
         run: uv build
+      - name: Publish docs
+        run: uv run mkdocs gh-deploy --force
       - name: Publish
         run: uv publish
