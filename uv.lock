@@ -923,7 +923,7 @@ dev = [
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
     { name = "ruff", specifier = ">=0.15.12" },
-    { name = "types-aiofiles", specifier = ">=25.1.0.20260409" },
+    { name = "types-aiofiles", specifier = ">=25.1.0" },
 ]
 
 [[package]]
